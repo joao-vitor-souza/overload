@@ -27,14 +27,18 @@ def main() -> None:
     """Run main application."""
     show_logo()
     try:
-        if (method := check_method_input()) in ["arp-spoof"]:
+        if (method := check_method_input()) in ["arp-spoof", "dns-spoof"]:
             show_local_host_ips()
         target = (
             check_http_target_input()
-            if method not in ["arp-spoof"]
+            if method not in ["arp-spoof", "dns-spoof"]
             else check_local_target_input()
         )
-        threads = check_number_input("threads") if method not in ["arp-spoof"] else 1
+        threads = (
+            check_number_input("threads")
+            if method not in ["arp-spoof", "syn-flood", "dns-spoof"]
+            else 1
+        )
         time = check_number_input("time")
         sleep_time = check_number_input("sleep time") if "slowloris" in method else 0
 

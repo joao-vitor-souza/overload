@@ -88,7 +88,7 @@ def get_target_domain(target: str) -> str:
 
 
 def get_host_ip() -> str:
-    """Get host's ip.
+    """Get host's IP.
 
     Args:
         None
@@ -127,12 +127,12 @@ def show_local_host_ips() -> None:
     print(f"{F.RED}│   ├───{F.BLUE} Avaliable Hosts:{F.RESET}")
     print(f"{F.RED}│   │")
 
-    try:
+    if len(__get_local_host_ips()[1:-1]) == 0:
+        print(f"{F.RED}│   ├───{F.MAGENTA} [!] {F.RED}No Hosts Avaliable!{F.RESET}")
+    else:
         for host in __get_local_host_ips()[1:-1]:
             print(f"{F.RED}│   │    {F.GREEN} {host}{F.RESET}")
-        print(f"{F.RED}│   │")
-    except IndexError:
-        print(f"{F.RED}│   ├───{F.MAGENTA} [!] {F.RED}No Hosts Avaliable!{F.RESET}")
+    print(f"{F.RED}│   │")
 
 
 @cache
